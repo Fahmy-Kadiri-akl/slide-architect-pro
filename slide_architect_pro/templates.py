@@ -203,7 +203,35 @@ def get_template_config(template_name: str) -> Dict:
     config = TEMPLATE_CONFIGS.get(base_template, TEMPLATE_CONFIGS.get(template_name))
     if config is None:
         logger.warning(f"Template config not found for '{template_name}', using minimal")
-        config = TEMPLATE_CONFIGS["minimal"]
+        config = TEMPLATE_CONFIGS["minimal"].copy()
+    
+    # Ensure all required keys exist with safe defaults
+    default_config = {
+        "font_family": "Arial",
+        "title_font_size": 24,
+        "body_font_size": 18,
+        "colors": {
+            "title": (0, 0, 0),
+            "body": (64, 64, 64),
+            "background": (255, 255, 255),
+            "accent": (0, 120, 215)
+        },
+        "layout_preferences": {
+            "title_slide": 0,
+            "content_slide": 1,
+            "two_column": 1,  # Fallback to content slide if two_column not available
+            "blank": 1        # Fallback to content slide if blank not available
+        }
+    }
+    
+    # Merge with defaults
+    for key, value in default_config.items():
+        if key not in config:
+            config[key] = value
+        elif isinstance(value, dict):
+            for subkey, subvalue in value.items():
+                if subkey not in config[key]:
+                    config[key][subkey] = subvalue
     
     return config
 

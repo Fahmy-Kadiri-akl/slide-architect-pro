@@ -1,22 +1,22 @@
 # slide_architect_pro/core.py
 
 import asyncio
-from pydantic import BaseModel, validator
-from typing import Optional, Dict, List, Union
 import json
 import os
 import mistune
 import bleach
+import tempfile
+import stat
+import uuid
+import re
+import logging
+from pathlib import Path
+from typing import Optional, Dict, List, Union, Any
+from pydantic import BaseModel, field_validator
 from python_pptx import Presentation
 from python_pptx.util import Inches, Pt
 from python_pptx.enum.text import PP_ALIGN
 from python_pptx.dml.color import RGBColor
-from pathlib import Path
-import uuid
-import re
-import logging
-import tempfile
-import stat
 from .llm_adapters import LLMAdapter
 from .templates import SLIDE_ARCHITECT_PROMPT_V3_2, TEMPLATE_CONFIGS, download_template, get_template_config
 from .renderers import render_vega_lite
@@ -32,8 +32,9 @@ class SlideInput(BaseModel):
     style: Optional[str] = None
     template: str = "minimal"
 
-    @validator("*")
-    def sanitize_input(cls, v):
+    @field_validator("*", mode="before")
+    @classmethod
+    def sanitize_input(cls, v: Any) -> Any:
         if isinstance(v, str):
             # Clean HTML and limit length
             cleaned = bleach.clean(v, tags=[], strip=True)
@@ -47,12 +48,12 @@ class SlideInput(BaseModel):
 
 class SlideRenderer(mistune.HTMLRenderer):
     def __init__(self):
-        super().__init__()
+        super().__init__(escape=False)
         self.slides = []
         self.current_slide = None
         self.section = None
 
-    def heading(self, text, level, **attrs):
+    def heading(self, text: str, level: int, **attrs) -> str:
         text = bleach.clean(text, tags=[], strip=True)
         if level == 1 and text.startswith("Slide "):
             if self.current_slide:
@@ -70,7 +71,7 @@ class SlideRenderer(mistune.HTMLRenderer):
             return ""
         return super().heading(text, level, **attrs)
 
-    def paragraph(self, text):
+    def paragraph(self, text: str) -> str:
         text = bleach.clean(text, tags=[], strip=True)
         if not self.current_slide:
             return ""
@@ -92,13 +93,13 @@ class SlideRenderer(mistune.HTMLRenderer):
             self.current_slide[self.section].append(text.strip())
         return ""
 
-    def list_item(self, text):
+    def list_item(self, text: str) -> str:
         text = bleach.clean(text, tags=[], strip=True)
         if self.section == "content":
             self.current_slide["content"].append(text.strip())
         return ""
 
-    def block_code(self, code, info=None):
+    def block_code(self, code: str, info: Optional[str] = None) -> str:
         if self.section == "visuals":
             if info in ["json", "mermaid", "plantuml", "latex"]:
                 code = bleach.clean(code, tags=[], strip=True)
@@ -114,7 +115,7 @@ class SlideRenderer(mistune.HTMLRenderer):
                 logger.warning(f"Unsupported code block language: {info}")
         return ""
 
-    def finish(self):
+    def finish(self) -> List[Dict[str, Any]]:
         if self.current_slide:
             self.slides.append(self.current_slide)
         return self.slides
@@ -154,7 +155,7 @@ class SlideArchitectPro:
             logger.error(f"Cannot setup work directory {self.work_dir}: {e}")
             raise ValueError(f"Cannot setup work directory: {e}")
 
-    async def generate_deck(self, input_data: SlideInput, llm_adapter: Union[LLMAdapter, str]) -> Dict:
+    async def generate_deck(self, input_data: SlideInput, llm_adapter: Union[LLMAdapter, str]) -> Dict[str, Any]:
         try:
             # Map audience to tone/style if not specified
             tone_style_map = {
@@ -190,11 +191,16 @@ Style: {style}
             if isinstance(llm_adapter, str) and llm_adapter == "offline":
                 markdown_output = self._offline_response(full_prompt, input_data)
             else:
-                markdown_output = await llm_adapter.generate(full_prompt)
-                if len(markdown_output) > 100_000:
-                    logger.warning("LLM response too large")
-                    raise ValueError("LLM response exceeds maximum size")
-                markdown_output = bleach.clean(markdown_output, tags=["pre", "code"], strip=True)
+                try:
+                    markdown_output = await llm_adapter.generate(full_prompt)
+                    if len(markdown_output) > 100_000:
+                        logger.warning("LLM response too large")
+                        raise ValueError("LLM response exceeds maximum size")
+                    markdown_output = bleach.clean(markdown_output, tags=["pre", "code"], strip=True)
+                except Exception as llm_error:
+                    logger.error(f"LLM generation failed: {llm_error}")
+                    logger.info("Falling back to offline mode")
+                    markdown_output = self._offline_response(full_prompt, input_data)
 
             # Convert to JSON and validate
             json_output = self._convert_markdown_to_json(markdown_output)
@@ -242,9 +248,13 @@ Message: {message}
 
 Output only valid JSON:
 """
-            intent_output = await llm_adapter.generate(intent_prompt)
-            if len(intent_output) > 10_000:
-                logger.warning("Intent extraction response too large")
+            try:
+                intent_output = await llm_adapter.generate(intent_prompt)
+                if len(intent_output) > 10_000:
+                    logger.warning("Intent extraction response too large")
+                    return self._regex_parse_chat_message(message)
+            except Exception as llm_error:
+                logger.warning(f"LLM intent extraction failed: {llm_error}")
                 return self._regex_parse_chat_message(message)
 
             try:
@@ -385,7 +395,7 @@ sequenceDiagram
 **Engagement Techniques:** Open floor for questions and discussion.
 """
 
-    def _convert_markdown_to_json(self, markdown_text: str) -> Dict:
+    def _convert_markdown_to_json(self, markdown_text: str) -> Dict[str, Any]:
         try:
             renderer = SlideRenderer()
             parser = mistune.create_markdown(renderer=renderer)
@@ -400,22 +410,40 @@ sequenceDiagram
             logger.error(f"Markdown parsing error: {str(e)}")
             raise ValueError(f"Failed to parse Markdown: {str(e)}")
 
-    def _validate_automation_edge_cases(self, json_data: Dict):
+    def _validate_automation_edge_cases(self, json_data: Dict[str, Any]):
         """Validate and clean up generated slide data"""
-        for slide in json_data["slides"]:
+        if "slides" not in json_data or not isinstance(json_data["slides"], list):
+            raise ValueError("Invalid slide data structure")
+            
+        for i, slide in enumerate(json_data["slides"]):
+            if not isinstance(slide, dict):
+                logger.warning(f"Invalid slide {i}, skipping")
+                continue
+                
+            # Ensure required fields exist
+            required_fields = ["title", "content", "visuals", "notes", "engagement", "alt_text", "type"]
+            for field in required_fields:
+                if field not in slide:
+                    slide[field] = [] if field in ["content", "visuals", "notes", "engagement", "alt_text"] else ("standard" if field == "type" else "")
+            
             try:
                 visuals_to_remove = []
-                for i, visual in enumerate(slide["visuals"]):
+                for j, visual in enumerate(slide["visuals"]):
+                    if not isinstance(visual, dict) or "lang" not in visual or "code" not in visual:
+                        logger.warning(f"Invalid visual {j} in slide {i}")
+                        visuals_to_remove.append(j)
+                        continue
+                        
                     if visual["lang"] == "json" and "vega" in visual["code"].lower():
                         try:
                             data = json.loads(visual["code"])
                             if "data" in data and "values" in data["data"]:
                                 if len(data["data"]["values"]) > 50:
                                     logger.warning(f"Chart dataset exceeds 50 points in slide {slide['title']}")
-                                    visuals_to_remove.append(i)
+                                    visuals_to_remove.append(j)
                         except (json.JSONDecodeError, KeyError) as e:
                             logger.warning(f"Invalid Vega-Lite JSON in slide {slide['title']}: {e}")
-                            visuals_to_remove.append(i)
+                            visuals_to_remove.append(j)
                     elif visual["lang"] in ["mermaid", "plantuml"]:
                         nodes = visual["code"].count("->") + visual["code"].count("-->>")
                         if nodes > 10:
@@ -423,20 +451,25 @@ sequenceDiagram
                             slide["notes"].append("Consider splitting complex diagram across multiple slides")
                     elif visual["lang"] == "python":
                         logger.warning(f"Python code block ignored in slide {slide['title']}")
-                        visuals_to_remove.append(i)
+                        visuals_to_remove.append(j)
                 
                 # Remove invalid visuals (in reverse order to maintain indices)
-                for i in reversed(visuals_to_remove):
-                    slide["visuals"].pop(i)
+                for j in reversed(visuals_to_remove):
+                    slide["visuals"].pop(j)
                     
             except Exception as e:
-                logger.error(f"Validation error in slide {slide['title']}: {str(e)}")
-                slide["notes"].append(f"Validation error: {str(e)}")
+                logger.error(f"Validation error in slide {slide.get('title', i)}: {str(e)}")
+                if isinstance(slide.get("notes"), list):
+                    slide["notes"].append(f"Validation error: {str(e)}")
+                else:
+                    slide["notes"] = [f"Validation error: {str(e)}"]
 
-    async def _generate_pptx(self, json_data: Dict, title: str, template: str) -> Path:
+    async def _generate_pptx(self, json_data: Dict[str, Any], title: str, template: str) -> Path:
         try:
-            # Try to download template if it's a downloadable one
-            template_file = download_template(template, self.work_dir)
+            # Try to download template if it's a downloadable one (run in thread pool)
+            import asyncio
+            loop = asyncio.get_event_loop()
+            template_file = await loop.run_in_executor(None, download_template, template, self.work_dir)
             
             if template_file and template_file.exists():
                 logger.info(f"Using downloaded template: {template_file}")
@@ -451,31 +484,44 @@ sequenceDiagram
 
             for i, slide_data in enumerate(json_data["slides"]):
                 try:
-                    # Choose layout based on slide type and content
+                    # Choose layout based on slide type and content - with safety checks
+                    max_layouts = len(prs.slide_layouts)
+                    
                     if i == 0:
-                        layout = prs.slide_layouts[template_config["layout_preferences"]["title_slide"]]
+                        layout_idx = min(template_config["layout_preferences"]["title_slide"], max_layouts - 1)
                     elif slide_data["type"] == "chart":
-                        layout = prs.slide_layouts[template_config["layout_preferences"]["blank"]]
+                        layout_idx = min(template_config["layout_preferences"]["blank"], max_layouts - 1)
                     elif slide_data["type"] == "diagram":
-                        layout = prs.slide_layouts[template_config["layout_preferences"]["blank"]]
+                        layout_idx = min(template_config["layout_preferences"]["blank"], max_layouts - 1)
                     elif "comparison" in slide_data["title"].lower():
-                        layout = prs.slide_layouts[template_config["layout_preferences"]["two_column"]]
+                        layout_idx = min(template_config["layout_preferences"]["two_column"], max_layouts - 1)
                     elif slide_data["visuals"] and not slide_data["content"]:
-                        layout = prs.slide_layouts[template_config["layout_preferences"]["blank"]]
+                        layout_idx = min(template_config["layout_preferences"]["blank"], max_layouts - 1)
                     else:
-                        layout = prs.slide_layouts[template_config["layout_preferences"]["content_slide"]]
+                        layout_idx = min(template_config["layout_preferences"]["content_slide"], max_layouts - 1)
 
+                    layout = prs.slide_layouts[layout_idx]
                     slide = prs.slides.add_slide(layout)
                     
                     # Set title
-                    if slide.shapes.title:
-                        title_shape = slide.shapes.title
-                        title_shape.text = slide_data["title"]
-                        if title_shape.text_frame.paragraphs:
-                            p = title_shape.text_frame.paragraphs[0]
-                            p.font.name = template_config["font_family"]
-                            p.font.size = Pt(template_config["title_font_size"])
-                            p.font.color.rgb = RGBColor(*template_config["colors"]["title"])
+                    try:
+                        if hasattr(slide, 'shapes') and hasattr(slide.shapes, 'title') and slide.shapes.title:
+                            title_shape = slide.shapes.title
+                            title_shape.text = slide_data["title"]
+                            if hasattr(title_shape, 'text_frame') and title_shape.text_frame and title_shape.text_frame.paragraphs:
+                                p = title_shape.text_frame.paragraphs[0]
+                                if hasattr(p, 'font'):
+                                    p.font.name = template_config["font_family"]
+                                    p.font.size = Pt(template_config["title_font_size"])
+                                    p.font.color.rgb = RGBColor(*template_config["colors"]["title"])
+                    except Exception as title_error:
+                        logger.warning(f"Failed to set title for slide {i}: {title_error}")
+                        # Try to add title as text box
+                        try:
+                            title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.2), Inches(9), Inches(1))
+                            title_box.text = slide_data["title"]
+                        except:
+                            pass
 
                     # Add content
                     if slide_data["content"]:
@@ -514,35 +560,107 @@ sequenceDiagram
     def _add_slide_content(self, slide, slide_data, template_config):
         """Add content to a slide based on its type"""
         try:
+            if not slide_data.get("content"):
+                return
+                
             if slide_data["type"] == "comparison" and len(slide.placeholders) >= 3:
                 # Use two-column layout
-                left_placeholder = slide.placeholders[1]
-                right_placeholder = slide.placeholders[2]
-                
-                for i, item in enumerate(slide_data["content"]):
-                    target = left_placeholder if i % 2 == 0 else right_placeholder
-                    if target.text_frame:
-                        target.text += f"• {item}\n"
-                        if target.text_frame.paragraphs:
-                            p = target.text_frame.paragraphs[0]
-                            p.font.name = template_config["font_family"]
-                            p.font.size = Pt(template_config["body_font_size"])
-                            p.font.color.rgb = RGBColor(*template_config["colors"]["body"])
+                try:
+                    left_placeholder = slide.placeholders[1]
+                    right_placeholder = slide.placeholders[2]
+                    
+                    for i, item in enumerate(slide_data["content"]):
+                        target = left_placeholder if i % 2 == 0 else right_placeholder
+                        if hasattr(target, 'text_frame') and target.text_frame:
+                            target.text += f"• {item}\n"
+                            try:
+                                if target.text_frame.paragraphs:
+                                    p = target.text_frame.paragraphs[0]
+                                    p.font.name = template_config["font_family"]
+                                    p.font.size = Pt(template_config["body_font_size"])
+                                    p.font.color.rgb = RGBColor(*template_config["colors"]["body"])
+                            except Exception as font_error:
+                                logger.warning(f"Font formatting failed: {font_error}")
+                except Exception as layout_error:
+                    logger.warning(f"Two-column layout failed: {layout_error}")
+                    # Fall back to standard layout
+                    self._add_standard_content(slide, slide_data, template_config)
             else:
                 # Standard content layout
-                content_placeholder = None
-                for placeholder in slide.placeholders:
-                    if placeholder.placeholder_format.type == 2:  # Body placeholder
-                        content_placeholder = placeholder
-                        break
-                
-                if content_placeholder and content_placeholder.text_frame:
-                    content_text = "\n".join([f"• {item}" for item in slide_data["content"]])
-                    content_placeholder.text = content_text
-                    if content_placeholder.text_frame.paragraphs:
-                        for p in content_placeholder.text_frame.paragraphs:
-                            p.font.name = template_config["font_family"]
-                            p.font.size = Pt(template_config["body_font_size"])
-                            p.font.color.rgb = RGBColor(*template_config["colors"]["body"])
+                self._add_standard_content(slide, slide_data, template_config)
         except Exception as e:
             logger.warning(f"Failed to add content to slide: {e}")
+    
+    def _add_standard_content(self, slide, slide_data, template_config):
+        """Add content using standard single-column layout"""
+        try:
+            content_placeholder = None
+            
+            # Try different methods to find content placeholder
+            # Method 1: Look for body placeholder by type
+            try:
+                for placeholder in slide.placeholders:
+                    if hasattr(placeholder, 'placeholder_format') and placeholder.placeholder_format.type == 2:  # Body placeholder
+                        content_placeholder = placeholder
+                        break
+            except:
+                pass
+            
+            # Method 2: Look for placeholders by index (common patterns)
+            if not content_placeholder:
+                try:
+                    for idx in [1, 2, 3]:  # Common content placeholder indices
+                        if idx < len(slide.placeholders):
+                            placeholder = slide.placeholders[idx]
+                            if (hasattr(placeholder, 'text_frame') and 
+                                placeholder.text_frame and 
+                                placeholder != slide.shapes.title):
+                                content_placeholder = placeholder
+                                break
+                except:
+                    pass
+            
+            # Method 3: Find any text frame that's not the title
+            if not content_placeholder:
+                try:
+                    for shape in slide.shapes:
+                        if (hasattr(shape, 'text_frame') and 
+                            shape.text_frame and 
+                            shape != slide.shapes.title and
+                            hasattr(shape, 'placeholder_format')):
+                            content_placeholder = shape
+                            break
+                except:
+                    pass
+            
+            # Method 4: Create a text box if no placeholder found
+            if not content_placeholder:
+                try:
+                    from python_pptx.util import Inches
+                    content_placeholder = slide.shapes.add_textbox(
+                        Inches(0.5), Inches(1.5), Inches(9), Inches(5)
+                    )
+                    logger.info("Created new text box for content")
+                except Exception as e:
+                    logger.warning(f"Failed to create text box: {e}")
+                    return
+            
+            # Add content if placeholder found or created
+            if content_placeholder and hasattr(content_placeholder, 'text_frame') and content_placeholder.text_frame:
+                content_text = "\n".join([f"• {item}" for item in slide_data["content"]])
+                content_placeholder.text = content_text
+                
+                try:
+                    if content_placeholder.text_frame.paragraphs:
+                        for p in content_placeholder.text_frame.paragraphs:
+                            if hasattr(p, 'font'):
+                                p.font.name = template_config["font_family"]
+                                p.font.size = Pt(template_config["body_font_size"])
+                                p.font.color.rgb = RGBColor(*template_config["colors"]["body"])
+                except Exception as font_error:
+                    logger.warning(f"Font formatting failed: {font_error}")
+            else:
+                logger.warning("No suitable content placeholder found and couldn't create one")
+                
+        except Exception as e:
+            logger.warning(f"Failed to add standard content: {e}")

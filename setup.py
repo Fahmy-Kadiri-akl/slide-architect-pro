@@ -1,4 +1,13 @@
 from setuptools import setup, find_packages
+import os
+
+# Read the README file if it exists
+def read_readme():
+    try:
+        with open("README.md", "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return "A secure, portable MCP server for generating professional slide decks via chat"
 
 setup(
     name="slide-architect-pro",
@@ -16,13 +25,14 @@ setup(
         "uvicorn==0.30.6",
         "requests==2.31.0",
         "Pillow==10.1.0",
-        "vl-convert-python>=1.1.0"  # Required for Altair SVG export
+        "vl-convert-python>=1.1.0",
+        "websockets>=11.0.0"
     ],
     scripts=["run_server.py"],
     author="Your Name",
     author_email="your.email@example.com",
     description="A secure, portable MCP server for generating professional slide decks via chat",
-    long_description=open("README.md").read(),
+    long_description=read_readme(),
     long_description_content_type="text/markdown",
     url="https://github.com/yourusername/slide-architect-pro",
     classifiers=[
@@ -30,5 +40,5 @@ setup(
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent"
     ],
-    python_requires=">=3.9"  # Fixed to match actual compatibility
+    python_requires=">=3.9"
 )

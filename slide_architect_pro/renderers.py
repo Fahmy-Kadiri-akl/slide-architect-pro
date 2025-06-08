@@ -1,6 +1,5 @@
 import json
 import altair as alt
-from cairosvg import svg2png
 from pathlib import Path
 import uuid
 import logging
@@ -29,28 +28,53 @@ def render_vega_lite(vega_spec: str, work_dir: Path) -> Path:
         chart = alt.Chart.from_dict(spec)
         
         # Create file paths
-        svg_file = work_dir / f"vega_{uuid.uuid4()}.svg"
         png_file = work_dir / f"vega_{uuid.uuid4()}.png"
         
         try:
-            # Save chart as SVG with explicit format
-            chart.save(str(svg_file), format='svg')
+            # Try to use vl-convert-python for direct PNG conversion
+            try:
+                import vl_convert as vlc
+                png_data = vlc.vegalite_to_png(spec)
+                with open(png_file, 'wb') as f:
+                    f.write(png_data)
+                logger.info(f"Successfully rendered Vega-Lite chart to {png_file} using vl-convert")
+                return png_file
+            except ImportError:
+                logger.warning("vl-convert-python not available, trying alternative methods")
             
-            # Convert SVG to PNG
-            with open(svg_file, 'rb') as svg_input:
-                svg2png(file_obj=svg_input, write_to=str(png_file), scale=2)
-            
-            # Clean up SVG file
-            if svg_file.exists():
-                svg_file.unlink()
+            # Fallback: try SVG then convert to PNG
+            try:
+                svg_file = work_dir / f"vega_{uuid.uuid4()}.svg"
+                chart.save(str(svg_file), format='svg')
                 
-            logger.info(f"Successfully rendered Vega-Lite chart to {png_file}")
-            return png_file
+                # Convert SVG to PNG using cairosvg if available
+                try:
+                    from cairosvg import svg2png
+                    with open(svg_file, 'rb') as svg_input:
+                        svg2png(file_obj=svg_input, write_to=str(png_file), scale=2)
+                    
+                    # Clean up SVG file
+                    if svg_file.exists():
+                        svg_file.unlink()
+                        
+                    logger.info(f"Successfully rendered Vega-Lite chart to {png_file} using cairosvg")
+                    return png_file
+                except ImportError:
+                    logger.warning("cairosvg not available")
+                    # Clean up SVG file if cairosvg fails
+                    if svg_file.exists():
+                        svg_file.unlink()
+                    
+            except Exception as e:
+                logger.warning(f"SVG fallback failed: {e}")
+            
+            # Final fallback: create placeholder
+            return _create_placeholder_image(work_dir, "Chart rendering unavailable")
             
         except Exception as e:
             logger.error(f"Failed to save or convert chart: {e}")
             # Clean up any partial files
-            for temp_file in [svg_file, png_file]:
+            for temp_file in [png_file]:
                 if temp_file.exists():
                     try:
                         temp_file.unlink()

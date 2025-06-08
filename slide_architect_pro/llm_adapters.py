@@ -26,7 +26,8 @@ class GeminiAdapter(LLMAdapter):
             # Correct Gemini API endpoint with API key as query parameter
             url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key={self.api_key}"
             
-            async with aiohttp.ClientSession() as session:
+            timeout = aiohttp.ClientTimeout(total=60)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(
                     url,
                     headers={"Content-Type": "application/json"},
@@ -40,8 +41,7 @@ class GeminiAdapter(LLMAdapter):
                             "topP": 0.95,
                             "maxOutputTokens": 8192
                         }
-                    },
-                    timeout=aiohttp.ClientTimeout(total=60)
+                    }
                 ) as response:
                     response.raise_for_status()
                     data = await response.json()
@@ -72,7 +72,8 @@ class ChatGPTAdapter(LLMAdapter):
         try:
             url = "https://api.openai.com/v1/chat/completions"
             
-            async with aiohttp.ClientSession() as session:
+            timeout = aiohttp.ClientTimeout(total=60)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(
                     url,
                     headers={
@@ -84,8 +85,7 @@ class ChatGPTAdapter(LLMAdapter):
                         "messages": [{"role": "user", "content": prompt}],
                         "temperature": 0.7,
                         "max_tokens": 8192
-                    },
-                    timeout=aiohttp.ClientTimeout(total=60)
+                    }
                 ) as response:
                     response.raise_for_status()
                     data = await response.json()
