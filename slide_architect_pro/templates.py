@@ -3,6 +3,7 @@
 import requests
 from pathlib import Path
 import logging
+from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +132,7 @@ FREE_TEMPLATE_URLS = {
     "startup_pitch": "https://raw.githubusercontent.com/daveebbelaar/powerpoint-templates/main/startup-pitch.pptx"
 }
 
-def download_template(template_name: str, work_dir: Path) -> Path:
+def download_template(template_name: str, work_dir: Path) -> Optional[Path]:
     """Download a free template from GitHub repository"""
     try:
         if template_name not in FREE_TEMPLATE_URLS:
@@ -163,11 +164,11 @@ def download_template(template_name: str, work_dir: Path) -> Path:
         logger.error(f"Error processing template '{template_name}': {str(e)}")
         return None
 
-def get_template_config(template_name: str) -> dict:
+def get_template_config(template_name: str) -> Dict:
     """Get configuration for a specific template"""
     return TEMPLATE_CONFIGS.get(template_name, TEMPLATE_CONFIGS["minimal"])
 
-def list_available_templates() -> dict:
+def list_available_templates() -> Dict:
     """Return list of available templates"""
     return {
         "built_in": list(TEMPLATE_CONFIGS.keys()),

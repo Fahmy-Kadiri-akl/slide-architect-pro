@@ -9,11 +9,13 @@ setup(
         "pydantic==2.9.2",
         "aiohttp==3.10.5",
         "mistune==3.0.2",
-        "vega==4.0.0",
+        "altair==5.2.0",  # Changed from vega to altair for Vega-Lite
         "cairosvg==2.7.1",
         "bleach==6.1.0",
         "fastapi==0.115.0",
-        "uvicorn==0.30.6"
+        "uvicorn==0.30.6",
+        "requests==2.31.0",  # Added for template downloads
+        "Pillow==10.1.0"     # Added for image processing
     ],
     scripts=["run_server.py"],
     author="Your Name",
@@ -27,5 +29,5 @@ setup(
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent"
     ],
-    python_requires=">=3.9"
+    python_requires=">=3.10"  # Updated for Union type syntax
 )
