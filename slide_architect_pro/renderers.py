@@ -12,39 +12,63 @@ logger = logging.getLogger(__name__)
 def render_vega_lite(vega_spec: str, work_dir: Path) -> Path:
     """Render Vega-Lite specification to PNG image"""
     try:
+        # Enable Altair to render charts properly
+        alt.data_transformers.enable('json')
+        
         spec = json.loads(vega_spec)
-        if not isinstance(spec, dict) or "$schema" not in spec or "data" not in spec:
-            logger.warning("Invalid Vega-Lite specification")
+        if not isinstance(spec, dict) or "$schema" not in spec:
+            logger.warning("Invalid Vega-Lite specification - missing schema")
             raise ValueError("Invalid Vega-Lite specification")
+        
+        # Validate that data exists
+        if "data" not in spec:
+            logger.warning("Invalid Vega-Lite specification - missing data")
+            raise ValueError("Invalid Vega-Lite specification - missing data")
         
         # Create Altair chart from spec
         chart = alt.Chart.from_dict(spec)
         
-        # Save as SVG first
+        # Create file paths
         svg_file = work_dir / f"vega_{uuid.uuid4()}.svg"
         png_file = work_dir / f"vega_{uuid.uuid4()}.png"
         
-        # Save chart as SVG
-        chart.save(str(svg_file))
-        
-        # Convert SVG to PNG
-        svg2png(url=str(svg_file), write_to=str(png_file), scale=2)
-        
-        # Clean up SVG file
-        if svg_file.exists():
-            svg_file.unlink()
+        try:
+            # Save chart as SVG with explicit format
+            chart.save(str(svg_file), format='svg')
             
-        return png_file
+            # Convert SVG to PNG
+            with open(svg_file, 'rb') as svg_input:
+                svg2png(file_obj=svg_input, write_to=str(png_file), scale=2)
+            
+            # Clean up SVG file
+            if svg_file.exists():
+                svg_file.unlink()
+                
+            logger.info(f"Successfully rendered Vega-Lite chart to {png_file}")
+            return png_file
+            
+        except Exception as e:
+            logger.error(f"Failed to save or convert chart: {e}")
+            # Clean up any partial files
+            for temp_file in [svg_file, png_file]:
+                if temp_file.exists():
+                    try:
+                        temp_file.unlink()
+                    except:
+                        pass
+            raise
         
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON in Vega-Lite spec: {e}")
+        return _create_placeholder_image(work_dir, "Invalid chart JSON")
     except Exception as e:
         logger.error(f"Failed to render Vega-Lite chart: {str(e)}")
-        # Create a fallback placeholder image
-        placeholder_file = work_dir / f"placeholder_{uuid.uuid4()}.png"
-        _create_placeholder_image(placeholder_file, "Chart could not be rendered")
-        return placeholder_file
+        return _create_placeholder_image(work_dir, "Chart could not be rendered")
 
-def _create_placeholder_image(file_path: Path, text: str):
+def _create_placeholder_image(work_dir: Path, text: str) -> Path:
     """Create a simple placeholder image with text"""
+    placeholder_file = work_dir / f"placeholder_{uuid.uuid4()}.png"
+    
     try:
         from PIL import Image, ImageDraw, ImageFont
         
@@ -54,21 +78,80 @@ def _create_placeholder_image(file_path: Path, text: str):
         
         # Try to use a font, fall back to default if not available
         try:
-            font = ImageFont.truetype("arial.ttf", 16)
-        except:
+            # Try common system fonts
+            font_paths = [
+                "/System/Library/Fonts/Arial.ttf",  # macOS
+                "/usr/share/fonts/truetype/arial.ttf",  # Linux
+                "C:/Windows/Fonts/arial.ttf",  # Windows
+            ]
+            font = None
+            for font_path in font_paths:
+                try:
+                    font = ImageFont.truetype(font_path, 16)
+                    break
+                except:
+                    continue
+            
+            if font is None:
+                font = ImageFont.load_default()
+                
+        except Exception:
             font = ImageFont.load_default()
         
-        # Calculate text position
-        bbox = draw.textbbox((0, 0), text, font=font)
-        text_width = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
-        x = (400 - text_width) // 2
-        y = (300 - text_height) // 2
+        # Calculate text position for centering
+        try:
+            # For newer Pillow versions
+            bbox = draw.textbbox((0, 0), text, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+        except AttributeError:
+            # For older Pillow versions
+            text_width, text_height = draw.textsize(text, font=font)
         
+        x = max(0, (400 - text_width) // 2)
+        y = max(0, (300 - text_height) // 2)
+        
+        # Add a border and background for better visibility
+        draw.rectangle([x-10, y-10, x+text_width+10, y+text_height+10], 
+                      fill='white', outline='darkgray', width=2)
         draw.text((x, y), text, fill='black', font=font)
-        img.save(str(file_path))
         
+        img.save(str(placeholder_file), 'PNG')
+        logger.info(f"Created placeholder image: {placeholder_file}")
+        
+    except ImportError:
+        logger.error("PIL/Pillow not available, creating empty placeholder")
+        # Create an empty file if PIL is not available
+        placeholder_file.touch()
     except Exception as e:
         logger.error(f"Failed to create placeholder image: {str(e)}")
-        # If all else fails, create an empty file
-        file_path.touch()
+        # Create an empty file as last resort
+        placeholder_file.touch()
+    
+    return placeholder_file
+
+def validate_vega_spec(spec_str: str) -> bool:
+    """Validate a Vega-Lite specification string"""
+    try:
+        spec = json.loads(spec_str)
+        
+        # Check required fields
+        required_fields = ["$schema", "data"]
+        for field in required_fields:
+            if field not in spec:
+                return False
+        
+        # Check data structure
+        if "data" in spec:
+            data = spec["data"]
+            if "values" in data:
+                if not isinstance(data["values"], list):
+                    return False
+                # Limit data size for security
+                if len(data["values"]) > 100:
+                    return False
+        
+        return True
+        
+    except (json.JSONDecodeError, TypeError):
+        return False

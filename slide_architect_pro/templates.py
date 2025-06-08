@@ -124,40 +124,68 @@ TEMPLATE_CONFIGS = {
     }
 }
 
-# Free template URLs (GitHub repositories)
+# Sample free template URLs - these would need to be real URLs in production
+# For now, we'll use None to indicate built-in templates only
 FREE_TEMPLATE_URLS = {
-    "minimal_clean": "https://raw.githubusercontent.com/daveebbelaar/powerpoint-templates/main/minimal-clean.pptx",
-    "corporate_blue": "https://raw.githubusercontent.com/daveebbelaar/powerpoint-templates/main/corporate-blue.pptx",
-    "modern_gradient": "https://raw.githubusercontent.com/daveebbelaar/powerpoint-templates/main/modern-gradient.pptx",
-    "startup_pitch": "https://raw.githubusercontent.com/daveebbelaar/powerpoint-templates/main/startup-pitch.pptx"
+    # These URLs are examples - replace with real template repositories
+    # "minimal_clean": "https://github.com/microsoft/templates/raw/main/minimal.pptx",
+    # "corporate_blue": "https://github.com/microsoft/templates/raw/main/corporate.pptx",
 }
 
 def download_template(template_name: str, work_dir: Path) -> Optional[Path]:
-    """Download a free template from GitHub repository"""
+    """Download a free template from a repository"""
     try:
         if template_name not in FREE_TEMPLATE_URLS:
-            logger.warning(f"Template '{template_name}' not found in free templates")
+            logger.info(f"Template '{template_name}' not found in downloadable templates, using built-in config")
             return None
             
         url = FREE_TEMPLATE_URLS[template_name]
+        if not url:  # Handle None/empty URLs
+            logger.info(f"No download URL for template '{template_name}', using built-in config")
+            return None
+            
         template_path = work_dir / f"{template_name}.pptx"
         
-        # Skip download if template already exists
-        if template_path.exists():
+        # Skip download if template already exists and is valid
+        if template_path.exists() and template_path.stat().st_size > 0:
             logger.info(f"Template '{template_name}' already exists locally")
             return template_path
             
         logger.info(f"Downloading template '{template_name}' from {url}")
-        response = requests.get(url, timeout=30)
+        
+        # Download with proper headers and timeout
+        headers = {
+            'User-Agent': 'SlideArchitectPro/3.2 (Template Downloader)',
+            'Accept': 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+        }
+        
+        response = requests.get(url, timeout=30, headers=headers, stream=True)
         response.raise_for_status()
         
+        # Check content type
+        content_type = response.headers.get('content-type', '')
+        if 'presentation' not in content_type and 'octet-stream' not in content_type:
+            logger.warning(f"Unexpected content type for template: {content_type}")
+        
+        # Write file in chunks to handle large templates
         with open(template_path, "wb") as f:
-            f.write(response.content)
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+        
+        # Validate downloaded file
+        if template_path.stat().st_size == 0:
+            logger.error(f"Downloaded template '{template_name}' is empty")
+            template_path.unlink()
+            return None
             
         logger.info(f"Successfully downloaded template to {template_path}")
         return template_path
         
-    except requests.RequestException as e:
+    except requests.exceptions.Timeout:
+        logger.error(f"Timeout downloading template '{template_name}'")
+        return None
+    except requests.exceptions.RequestException as e:
         logger.error(f"Failed to download template '{template_name}': {str(e)}")
         return None
     except Exception as e:
@@ -166,11 +194,49 @@ def download_template(template_name: str, work_dir: Path) -> Optional[Path]:
 
 def get_template_config(template_name: str) -> Dict:
     """Get configuration for a specific template"""
-    return TEMPLATE_CONFIGS.get(template_name, TEMPLATE_CONFIGS["minimal"])
+    # Handle both built-in and downloadable template names
+    base_template = template_name
+    if "_" in template_name:
+        # Extract base template from names like "minimal_clean" 
+        base_template = template_name.split("_")[0]
+    
+    config = TEMPLATE_CONFIGS.get(base_template, TEMPLATE_CONFIGS.get(template_name))
+    if config is None:
+        logger.warning(f"Template config not found for '{template_name}', using minimal")
+        config = TEMPLATE_CONFIGS["minimal"]
+    
+    return config
 
 def list_available_templates() -> Dict:
     """Return list of available templates"""
+    downloadable = [name for name, url in FREE_TEMPLATE_URLS.items() if url]
+    
     return {
         "built_in": list(TEMPLATE_CONFIGS.keys()),
-        "downloadable": list(FREE_TEMPLATE_URLS.keys())
+        "downloadable": downloadable,
+        "all": list(TEMPLATE_CONFIGS.keys()) + downloadable
     }
+
+def validate_template_name(template_name: str) -> str:
+    """Validate and normalize template name"""
+    if not template_name or not isinstance(template_name, str):
+        return "minimal"
+    
+    # Clean the template name
+    clean_name = template_name.lower().strip()
+    
+    # Check if it's a valid template
+    available = list_available_templates()
+    all_templates = available["all"]
+    
+    if clean_name in all_templates:
+        return clean_name
+    
+    # Try to find a close match
+    for template in all_templates:
+        if template in clean_name or clean_name in template:
+            logger.info(f"Template '{template_name}' matched to '{template}'")
+            return template
+    
+    logger.warning(f"Template '{template_name}' not found, using minimal")
+    return "minimal"
