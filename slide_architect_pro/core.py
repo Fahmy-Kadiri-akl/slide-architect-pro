@@ -1,3 +1,5 @@
+# slide_architect_pro/core.py
+
 import asyncio
 from pydantic import BaseModel, validator
 from typing import Optional, Dict, List
@@ -8,12 +10,13 @@ import bleach
 from python_pptx import Presentation
 from python_pptx.util import Inches, Pt
 from python_pptx.enum.text import PP_ALIGN
+from python_pptx.dml.color import RGBColor
 from pathlib import Path
 import uuid
 import re
 import logging
 from .llm_adapters import LLMAdapter
-from .templates import SLIDE_ARCHITECT_PROMPT_V3_2
+from .templates import SLIDE_ARCHITECT_PROMPT_V3_2, TEMPLATE_CONFIGS, download_template, get_template_config
 from .renderers import render_vega_lite
 
 logger = logging.getLogger(__name__)
@@ -109,32 +112,10 @@ class SlideRenderer(mistune.HTMLRenderer):
 
 class SlideArchitectPro:
     def __init__(self):
-        self.prompt = SLIDE_ARCHITECT_PROMPT_V3 + "\n\n### Additional Instructions\n- For diagram requests (e.g., sequence diagram, flowchart), generate a valid Mermaid code block tailored to the slide's context. Ensure the diagram is concise (≤10 nodes) and includes a descriptive alt text."
+        self.prompt = SLIDE_ARCHITECT_PROMPT_V3_2 + "\n\n### Additional Instructions\n- For diagram requests (e.g., sequence diagram, flowchart), generate a valid Mermaid code block tailored to the slide's context. Ensure the diagram is concise (≤10 nodes) and includes a descriptive alt text."
         self.work_dir = Path(os.getenv("SLIDE_WORK_DIR", f"/tmp/slide_architect_pro_{uuid.uuid4()}"))
         self.work_dir.mkdir(parents=True, exist_ok=True)
-        self.templates = {
-            "minimal": {
-                "font": "Arial",
-                "title_size": Pt(24),
-                "body_size": Pt(18),
-                "colors": {"title": (0, 0, 0), "body": (0, 0, 0), "background": (255, 255, 255)},
-                "logo_pos": (Inches(0.5), Inches(0.5))
-            },
-            "corporate": {
-                "font": "Calibri",
-                "title_size": Pt(28),
-                "body_size": Pt(20),
-                "colors": {"title": (0, 51, 102), "body": (51, 51, 51), "background": (240, 240, 240)},
-                "logo_pos": (Inches(0.3), Inches(0.3))
-            },
-            "bold": {
-                "font": "Arial",
-                "title_size": Pt(32),
-                "body_size": Pt(22),
-                "colors": {"title": (200, 0, 0), "body": (0, 0, 0), "background": (255, 255, 200)},
-                "logo_pos": (Inches(0.5), Inches(0.5))
-            }
-        }
+        self.templates = TEMPLATE_CONFIGS
 
     async def generate_deck(self, input_data: SlideInput, llm_adapter: LLMAdapter) -> Dict:
         try:
@@ -167,7 +148,7 @@ Style: {style}
             full_prompt = self.prompt + "\n\n" + user_prompt
 
             if isinstance(llm_adapter, str) and llm_adapter == "offline":
-                markdown_output = self._offline_response(full_prompt)
+                markdown_output = self._offline_response(full_prompt, input_data)
             else:
                 markdown_output = await llm_adapter.generate(full_prompt)
                 if len(markdown_output) > 100_000:
@@ -178,7 +159,7 @@ Style: {style}
             json_output = self._convert_markdown_to_json(markdown_output)
             self._validate_automation_edge_cases(json_output)
 
-            pptx_file = self._generate_pptx(json_output, input_data.topic, input_data.template)
+            pptx_file = await self._generate_pptx(json_output, input_data.topic, input_data.template)
 
             md_file = self.work_dir / f"{input_data.topic.replace(' ', '_')}.md"
             json_file = self.work_dir / f"{input_data.topic.replace(' ', '_')}.json"
@@ -213,7 +194,7 @@ Message: {message}
 
 Example Output:
 ```json
-{
+{{
   "topic": "AI Cybersecurity Pitch",
   "audience": "Investors",
   "context": "TechCrunch Disrupt",
@@ -221,7 +202,7 @@ Example Output:
   "tone": "Formal",
   "style": "Clean & minimal",
   "template": "corporate"
-}
+}}
 ```
 """
             intent_output = await llm_adapter.generate(intent_prompt)
@@ -230,7 +211,14 @@ Example Output:
                 return self._regex_parse_chat_message(message)
 
             try:
-                intent_data = json.loads(intent_output.strip("```json\n").strip("```"))
+                # Extract JSON from response
+                json_match = re.search(r'```json\s*(\{.*?\})\s*```', intent_output, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(1)
+                else:
+                    json_str = intent_output.strip("```json\n").strip("```")
+                
+                intent_data = json.loads(json_str)
                 return SlideInput(**intent_data)
             except json.JSONDecodeError:
                 logger.warning("Invalid JSON from intent extraction")
@@ -276,64 +264,79 @@ Example Output:
             template=template
         )
 
-    def _offline_response(self, prompt: str) -> str:
-        return """# Slide 1 - Title Slide  
-**Title:** {topic}  
-**Subtitle:** {context}  
+    def _offline_response(self, prompt: str, input_data: SlideInput) -> str:
+        return f"""# Slide 1 - Title Slide  
+**Title:** {input_data.topic}  
+**Subtitle:** {input_data.context}  
 **Logo:** Top-right corner  
-**Slide Notes:** Introduce the topic.  
-**Engagement Techniques:** Share an anecdote.
+**Slide Notes:** Introduce the topic and set the stage.  
+**Engagement Techniques:** Share a compelling opening statement.
 
 # Slide 2 - Agenda  
 **Title:** Agenda  
-- Hook  
-- Problem  
-- Solution  
-- Conclusion  
+**Body:**
+- Hook: Why this matters
+- Problem: Current challenges
+- Solution: Our approach
+- Conclusion: Next steps
 
 # Slide 3 - Hook  
 **Title:** Why This Matters  
 **Body:**  
-- Engaging statistic or story  
+- Market opportunity is growing rapidly
+- Current solutions are inadequate
+- Time-sensitive opportunity
 **Visual:** Vega-Lite chart  
 ```json
-{
+{{
   "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
-  "data": {"values": [{"x": "A", "y": 10}, {"x": "B", "y": 20}]},
+  "data": {{"values": [{{"category": "Market Size", "value": 85}}, {{"category": "Growth Rate", "value": 45}}]}},
   "mark": "bar",
-  "encoding": {"x": {"field": "x"}, "y": {"field": "y"}}
-}
+  "encoding": {{"x": {{"field": "category", "type": "nominal"}}, "y": {{"field": "value", "type": "quantitative"}}}}
+}}
 ```  
-**Alt Text:** Bar chart showing key data.  
-**Slide Notes:** Set the stage.  
-**Engagement Techniques:** Ask a question.
+**Alt Text:** Bar chart showing market opportunity metrics.  
+**Slide Notes:** Emphasize the urgency and scale of opportunity.  
+**Engagement Techniques:** Ask audience about their experience with this problem.
 
 # Slide 4 - Solution  
 **Title:** Our Solution  
 **Body:**  
-- Key feature 1  
-- Key feature 2  
+- Innovative approach that addresses core issues
+- Proven technology with measurable results
+- Scalable implementation pathway
 **Visual:** Mermaid diagram  
 ```mermaid
 sequenceDiagram
-  User->>System: Request
-  System-->>User: Response
+  participant User
+  participant System
+  participant Database
+  User->>System: Submit Request
+  System->>Database: Process Data
+  Database-->>System: Return Results
+  System-->>User: Deliver Solution
 ```  
-**Alt Text:** Diagram of process flow.  
-**Slide Notes:** Highlight benefits.
+**Alt Text:** Process flow diagram showing solution workflow.
+**Slide Notes:** Walk through each step of the solution.
+**Engagement Techniques:** Demonstrate with a real example.
 
 # Slide 5 - Closing  
 **Title:** Call to Action  
 **Body:**  
-- {key_message}  
-**Slide Notes:** Summarize and close.  
-**Engagement Techniques:** Invite questions.
-""".format(topic=input_data.topic, context=input_data.context, key_message=input_data.key_message)
+- {input_data.key_message}
+- Ready to move forward together
+- Questions and next steps
+**Slide Notes:** Summarize key benefits and invite action.  
+**Engagement Techniques:** Open floor for questions and discussion.
+"""
 
     def _convert_markdown_to_json(self, markdown_text: str) -> Dict:
         try:
-            parser = mistune.create_markdown(renderer=SlideRenderer())
-            slides = parser(markdown_text)
+            renderer = SlideRenderer()
+            parser = mistune.create_markdown(renderer=renderer)
+            parser(markdown_text)  # Parse the markdown
+            slides = renderer.finish()  # Get the slides from renderer
+            
             if not slides:
                 logger.warning("No slides parsed from Markdown")
                 raise ValueError("No slides parsed from Markdown")
@@ -345,78 +348,110 @@ sequenceDiagram
     def _validate_automation_edge_cases(self, json_data: Dict):
         for slide in json_data["slides"]:
             try:
-                for visual in slide["visuals"]:
+                visuals_to_remove = []
+                for i, visual in enumerate(slide["visuals"]):
                     if visual["lang"] == "json" and "vega" in visual["code"].lower():
                         try:
                             data = json.loads(visual["code"])["data"]["values"]
                             if len(data) > 50:
                                 logger.warning(f"Chart dataset exceeds 50 points in slide {slide['title']}")
-                                raise ValueError("Chart dataset exceeds 50 data points")
-                        except json.JSONDecodeError:
+                                visuals_to_remove.append(i)
+                        except (json.JSONDecodeError, KeyError):
                             logger.warning(f"Invalid Vega-Lite JSON in slide {slide['title']}")
-                            slide["visuals"].remove(visual)
+                            visuals_to_remove.append(i)
                     elif visual["lang"] in ["mermaid", "plantuml"]:
-                        nodes = visual["code"].count("->")
+                        nodes = visual["code"].count("->") + visual["code"].count("-->>")
                         if nodes > 10:
                             logger.warning(f"Mermaid/PlantUML diagram too complex in slide {slide['title']}")
                             slide["notes"].append("Consider splitting complex diagram across multiple slides")
                     elif visual["lang"] == "python":
                         logger.warning(f"Python code block ignored in slide {slide['title']}")
-                        slide["visuals"].remove(visual)
+                        visuals_to_remove.append(i)
+                
+                # Remove invalid visuals (in reverse order to maintain indices)
+                for i in reversed(visuals_to_remove):
+                    slide["visuals"].pop(i)
+                    
             except Exception as e:
                 logger.error(f"Validation error in slide {slide['title']}: {str(e)}")
                 slide["notes"].append(f"Validation error: {str(e)}")
 
-    def _generate_pptx(self, json_data: Dict, title: str, template: str) -> Path:
+    async def _generate_pptx(self, json_data: Dict, title: str, template: str) -> Path:
         try:
-            prs = Presentation()
-            template = self.templates.get(template, self.templates["minimal"])
+            # Try to download template if it's a downloadable one
+            template_file = download_template(template, self.work_dir)
+            
+            if template_file and template_file.exists():
+                logger.info(f"Using downloaded template: {template_file}")
+                prs = Presentation(str(template_file))
+            else:
+                logger.info("Using default presentation template")
+                prs = Presentation()
+            
+            template_config = get_template_config(template)
             output_file = self.work_dir / f"{title.replace(' ', '_')}.pptx"
 
             for i, slide_data in enumerate(json_data["slides"]):
+                # Choose layout based on slide type and content
                 if i == 0:
-                    layout = prs.slide_layouts[0]
+                    layout = prs.slide_layouts[template_config["layout_preferences"]["title_slide"]]
                 elif slide_data["type"] == "chart":
-                    layout = prs.slide_layouts[6]
+                    layout = prs.slide_layouts[template_config["layout_preferences"]["blank"]]
                 elif slide_data["type"] == "diagram":
-                    layout = prs.slide_layouts[6]
+                    layout = prs.slide_layouts[template_config["layout_preferences"]["blank"]]
                 elif "comparison" in slide_data["title"].lower():
-                    layout = prs.slide_layouts[3]
+                    layout = prs.slide_layouts[template_config["layout_preferences"]["two_column"]]
                 elif slide_data["visuals"] and not slide_data["content"]:
-                    layout = prs.slide_layouts[8]
-                elif "quote" in slide_data["title"].lower():
-                    layout = prs.slide_layouts[5]
+                    layout = prs.slide_layouts[template_config["layout_preferences"]["blank"]]
                 else:
-                    layout = prs.slide_layouts[1]
+                    layout = prs.slide_layouts[template_config["layout_preferences"]["content_slide"]]
 
                 slide = prs.slides.add_slide(layout)
-                title_shape = slide.shapes.title
-                if title_shape:
+                
+                # Set title
+                if slide.shapes.title:
+                    title_shape = slide.shapes.title
                     title_shape.text = slide_data["title"]
-                    title_shape.text_frame.paragraphs[0].font.name = template["font"]
-                    title_shape.text_frame.paragraphs[0].font.size = template["title_size"]
+                    if title_shape.text_frame.paragraphs:
+                        p = title_shape.text_frame.paragraphs[0]
+                        p.font.name = template_config["font_family"]
+                        p.font.size = Pt(template_config["title_font_size"])
+                        p.font.color.rgb = RGBColor(*template_config["colors"]["title"])
 
+                # Add content
                 if slide_data["content"]:
-                    if slide_data["type"] == "comparison":
-                        left = slide.placeholders[1]
-                        right = slide.placeholders[2]
+                    if slide_data["type"] == "comparison" and len(slide.placeholders) >= 3:
+                        # Use two-column layout
+                        left_placeholder = slide.placeholders[1]
+                        right_placeholder = slide.placeholders[2]
+                        
                         for i, item in enumerate(slide_data["content"]):
-                            (left if i % 2 == 0 else right).text += item + "\n"
-                            (left if i % 2 == 0 else right).text_frame.paragraphs[0].font.name = template["font"]
-                            (left if i % 2 == 0 else right).text_frame.paragraphs[0].font.size = template["body_size"]
-                    elif slide_data["type"] == "quote":
-                        textbox = slide.shapes.add_textbox(Inches(1), Inches(2), Inches(8), Inches(4))
-                        textbox.text = "\n".join(slide_data["content"])
-                        textbox.text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
-                        textbox.text_frame.paragraphs[0].font.name = template["font"]
-                        textbox.text_frame.paragraphs[0].font.size = Pt(24)
+                            target = left_placeholder if i % 2 == 0 else right_placeholder
+                            if target.text_frame:
+                                target.text += f"• {item}\n"
+                                if target.text_frame.paragraphs:
+                                    p = target.text_frame.paragraphs[0]
+                                    p.font.name = template_config["font_family"]
+                                    p.font.size = Pt(template_config["body_font_size"])
+                                    p.font.color.rgb = RGBColor(*template_config["colors"]["body"])
                     else:
-                        body_shape = slide.placeholders[1] if 1 in slide.placeholders else None
-                        if body_shape:
-                            body_shape.text = "\n".join(slide_data["content"])
-                            body_shape.text_frame.paragraphs[0].font.name = template["font"]
-                            body_shape.text_frame.paragraphs[0].font.size = template["body_size"]
+                        # Standard content layout
+                        content_placeholder = None
+                        for placeholder in slide.placeholders:
+                            if placeholder.placeholder_format.type == 2:  # Body placeholder
+                                content_placeholder = placeholder
+                                break
+                        
+                        if content_placeholder and content_placeholder.text_frame:
+                            content_text = "\n".join([f"• {item}" for item in slide_data["content"]])
+                            content_placeholder.text = content_text
+                            if content_placeholder.text_frame.paragraphs:
+                                for p in content_placeholder.text_frame.paragraphs:
+                                    p.font.name = template_config["font_family"]
+                                    p.font.size = Pt(template_config["body_font_size"])
+                                    p.font.color.rgb = RGBColor(*template_config["colors"]["body"])
 
+                # Add visuals
                 for visual in slide_data["visuals"]:
                     if visual["lang"] == "json" and "vega" in visual["code"].lower():
                         try:
@@ -425,10 +460,18 @@ sequenceDiagram
                         except Exception as e:
                             logger.warning(f"Failed to render Vega-Lite in slide {slide_data['title']}: {str(e)}")
                     elif visual["lang"] == "mermaid":
-                        slide.shapes.add_textbox(Inches(3), Inches(2), Inches(4), Inches(2)).text = "Mermaid Diagram Placeholder"
+                        # Add placeholder for Mermaid diagrams
+                        textbox = slide.shapes.add_textbox(Inches(3), Inches(2), Inches(4), Inches(2))
+                        textbox.text = f"Mermaid Diagram:\n{visual['code'][:100]}..."
+                        if textbox.text_frame.paragraphs:
+                            p = textbox.text_frame.paragraphs[0]
+                            p.font.name = template_config["font_family"]
+                            p.font.size = Pt(12)
 
             prs.save(str(output_file))
+            logger.info(f"Successfully generated PowerPoint: {output_file}")
             return output_file
+            
         except Exception as e:
             logger.error(f"PowerPoint generation error: {str(e)}")
             raise ValueError(f"Failed to generate PowerPoint: {str(e)}")
