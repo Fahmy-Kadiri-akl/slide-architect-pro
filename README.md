@@ -4,10 +4,10 @@
 
 ### 1. Install Dependencies
 ```bash
-# Install from requirements.txt
-pip install -r requirements.txt
+# Install using the provided setup.py
+pip install .
 
-# OR install directly
+# OR install packages individually
 pip install python-pptx pydantic aiohttp mistune bleach fastapi uvicorn requests altair vl-convert-python cairosvg Pillow
 ```
 
