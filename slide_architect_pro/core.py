@@ -533,7 +533,14 @@ sequenceDiagram
                             if visual["lang"] == "json" and "vega" in visual["code"].lower():
                                 img_path = render_vega_lite(visual["code"], self.work_dir)
                                 if img_path and img_path.exists():
-                                    slide.shapes.add_picture(str(img_path), Inches(3), Inches(2), width=Inches(4))
+                                    picture = slide.shapes.add_picture(str(img_path), Inches(3), Inches(2), width=Inches(4))
+                                    try:
+                                        if slide_data.get("alt_text"):
+                                            picture.alt_text = slide_data["alt_text"][0]
+                                    except Exception as alt_err:
+                                        logger.warning(
+                                            f"Failed to set alt text for slide {slide_data['title']}: {alt_err}"
+                                        )
                             elif visual["lang"] == "mermaid":
                                 # Add placeholder for Mermaid diagrams
                                 textbox = slide.shapes.add_textbox(Inches(3), Inches(2), Inches(4), Inches(2))
