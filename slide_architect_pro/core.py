@@ -13,10 +13,10 @@ import logging
 from pathlib import Path
 from typing import Optional, Dict, List, Union, Any
 from pydantic import BaseModel, field_validator
-from python_pptx import Presentation
-from python_pptx.util import Inches, Pt
-from python_pptx.enum.text import PP_ALIGN
-from python_pptx.dml.color import RGBColor
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.enum.text import PP_ALIGN
+from pptx.dml.color import RGBColor
 from .llm_adapters import LLMAdapter
 from .templates import SLIDE_ARCHITECT_PROMPT_V3_2, TEMPLATE_CONFIGS, download_template, get_template_config
 from .renderers import render_vega_lite
@@ -643,7 +643,7 @@ sequenceDiagram
             # Method 4: Create a text box if no placeholder found
             if not content_placeholder:
                 try:
-                    from python_pptx.util import Inches
+                    from pptx.util import Inches
                     content_placeholder = slide.shapes.add_textbox(
                         Inches(0.5), Inches(1.5), Inches(9), Inches(5)
                     )
